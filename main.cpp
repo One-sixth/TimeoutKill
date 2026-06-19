@@ -6,7 +6,6 @@
 #include <cstdlib>
 
 // ========== 常量 ==========
-constexpr const wchar_t* MUTEX_NAME = L"Global\\TimeoutKill_v1";
 constexpr const wchar_t* WINDOW_CLASS = L"TimeoutKillClass";
 constexpr const wchar_t* WINDOW_TITLE = L"TimeoutKill";
 constexpr int BASE_DPI = 96;
@@ -30,15 +29,17 @@ static HWND g_hEditInterval = nullptr;
 static HWND g_hLabelCount = nullptr;
 static HWND g_hLog = nullptr;
 
-static HANDLE g_hMutex = nullptr;
 static HANDLE g_hThread = nullptr;
 static bool g_threadActive = false;
+static bool g_consoleBreak = false;  // Ctrl+C 信号
 static int g_checkCount = 0;
 static int g_maxChecks = 20;
 static int g_intervalMin = 30;
 static int g_dpi = 96;
 static HFONT g_hFont = nullptr;
-static HBRUSH g_hStatusBrush = nullptr;
+static HBRUSH g_hWhiteBrush = nullptr;
+static COLORREF g_textColor = RGB(51, 51, 51);      // 深灰文字
+static COLORREF g_statusTextColor = RGB(100, 100, 100);
 
 // ========== DPI 缩放 ==========
 static int Scale(int value) { return ::MulDiv(value, g_dpi, BASE_DPI); }
@@ -112,9 +113,8 @@ static void AppendLog(const std::wstring& text) {
 // GUI 模式专用
 static void SetStatus(const wchar_t* text, COLORREF color) {
     if (g_hStatus) {
+        g_statusTextColor = color;
         SetWindowTextW(g_hStatus, text);
-        if (g_hStatusBrush) DeleteObject(g_hStatusBrush);
-        g_hStatusBrush = CreateSolidBrush(color);
         InvalidateRect(g_hStatus, nullptr, TRUE);
     }
 }
@@ -261,24 +261,58 @@ static std::wstring GetHelpText() {
     return
         L"TimeoutKill - 进程超时自动终止工具\n\n"
         L"用法:\n"
-        L"  TimeoutKill.exe                           启动 GUI 界面\n"
-        L"  TimeoutKill.exe --help                    显示帮助\n"
-        L"  TimeoutKill.exe start [选项]              命令行直接启动监控\n\n"
-        L"选项:\n"
+        L"  TimeoutKill.exe                              启动 GUI 界面\n"
+        L"  TimeoutKill.exe --help                       显示帮助\n"
+        L"  TimeoutKill.exe --process <名称> --count <次数> --interval <分钟>\n\n"
+        L"选项（命令行模式下全部必填）:\n"
         L"  --process <名称>    目标进程名（不含路径，不区分大小写）\n"
-        L"  --count <次数>      最大监视次数（默认 20）\n"
-        L"  --interval <分钟>   每次检查间隔，单位分钟（默认 30）\n\n"
+        L"  --count <次数>      最大监视次数\n"
+        L"  --interval <分钟>   每次检查间隔，单位分钟\n\n"
         L"示例:\n"
-        L"  TimeoutKill.exe start --process chrome.exe --count 10 --interval 5\n"
+        L"  TimeoutKill.exe --process chrome.exe --count 10 --interval 5\n"
         L"  每 5 分钟检查一次 chrome.exe，累计 10 次后终止\n\n"
         L"说明:\n"
         L"  命令行模式下按 Ctrl+C 可随时停止监控\n"
         L"  目标进程消失后计数归零，终止后自动继续监控下一轮\n";
 }
 
-static int RunHeadless(const std::wstring& processName, int maxChecks, int intervalMin) {
-    AllocConsole();
+// ========== 控制台初始化（设置编码+中文字体） ==========
+static void InitConsole() {
     SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut != INVALID_HANDLE_VALUE) {
+        CONSOLE_FONT_INFOEX cfi = {};
+        cfi.cbSize = sizeof(cfi);
+        cfi.dwFontSize.Y = 16;
+        cfi.FontWeight = FW_NORMAL;
+        wcscpy_s(cfi.FaceName, L"NSimSun");
+        SetCurrentConsoleFontEx(hOut, FALSE, &cfi);
+    }
+}
+
+// ========== 控制台 Ctrl+C 处理 ==========
+static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
+    if (ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT) {
+        g_consoleBreak = true;
+        g_threadActive = false;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static int RunHeadless(const std::wstring& processName, int maxChecks, int intervalMin) {
+    // 有现成控制台就用，没有才新建
+    if (!GetConsoleWindow()) {
+        AllocConsole();
+    } else {
+        // 已有控制台（从 cmd/PowerShell 启动），绑定 stdout/stderr
+        FILE* fDummy;
+        freopen_s(&fDummy, "CONOUT$", "w", stdout);
+        freopen_s(&fDummy, "CONOUT$", "w", stderr);
+    }
+    InitConsole();
+
     FILE* fDummy;
     freopen_s(&fDummy, "CONOUT$", "w", stdout);
     freopen_s(&fDummy, "CONOUT$", "w", stderr);
@@ -289,19 +323,22 @@ static int RunHeadless(const std::wstring& processName, int maxChecks, int inter
 
     StartNewLog();
 
+    // 注册 Ctrl+C 处理器
+    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+    g_consoleBreak = false;
+
     // 构建参数，启动统一监控线程
     auto* params = new MonitorParams{ processName, maxChecks, intervalMin };
     g_threadActive = true;
     g_hThread = CreateThread(nullptr, 0, MonitorThread, params, 0, nullptr);
 
-    // 主线程等待：每秒检查 Ctrl+C
+    // 主线程等待：直到 Ctrl+C 触发 g_threadActive = false
     while (g_threadActive) {
-        if (GetAsyncKeyState(VK_CANCEL) & 0x8000) {
-            wprintf(L"\n[TimeoutKill] 用户中断，退出监控\n");
-            g_threadActive = false;
-            break;
-        }
         Sleep(1000);
+    }
+
+    if (g_consoleBreak) {
+        wprintf(L"\n[TimeoutKill] 用户中断，退出监控\n");
     }
 
     if (g_hThread) { WaitForSingleObject(g_hThread, 3000); CloseHandle(g_hThread); g_hThread = nullptr; }
@@ -318,39 +355,37 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nShow) {
 
     // ========== 命令行解析 ==========
     std::vector<std::wstring> args = SplitArgs(GetCommandLineW());
-    bool hasCmdArgs = false, wantStart = false;
     std::wstring cliProcess;
-    int cliCount = 20, cliInterval = 30;
+    int cliCount = 0, cliInterval = 0;
 
     for (size_t i = 1; i < args.size(); ++i) {
         const std::wstring& a = args[i];
         if (a == L"--help" || a == L"-h") {
             bool needFree = !GetConsoleWindow(); if (needFree) AllocConsole();
-            SetConsoleOutputCP(CP_UTF8);
-            wprintf(L"%s", GetHelpText().c_str());
-            if (needFree) { Sleep(500); FreeConsole(); }
+            InitConsole();
+            HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+            DWORD written;
+            std::wstring help = GetHelpText();
+            WriteConsoleW(hOut, help.c_str(), (DWORD)help.size(), &written, nullptr);
+            system("pause");
+            if (needFree) FreeConsole();
             return 0;
         }
-        if (a == L"start") { hasCmdArgs = true; wantStart = true; continue; }
-        if (a == L"--process" && i + 1 < args.size()) { hasCmdArgs = true; cliProcess = args[++i]; continue; }
-        if (a == L"--count" && i + 1 < args.size()) { hasCmdArgs = true; cliCount = _wtoi(args[++i].c_str()); if (cliCount <= 0) cliCount = 20; continue; }
-        if (a == L"--interval" && i + 1 < args.size()) { hasCmdArgs = true; cliInterval = _wtoi(args[++i].c_str()); if (cliInterval <= 0) cliInterval = 30; continue; }
+        if (a == L"--process" && i + 1 < args.size()) { cliProcess = args[++i]; continue; }
+        if (a == L"--count" && i + 1 < args.size()) { cliCount = _wtoi(args[++i].c_str()); continue; }
+        if (a == L"--interval" && i + 1 < args.size()) { cliInterval = _wtoi(args[++i].c_str()); continue; }
     }
 
-    if (hasCmdArgs && !wantStart) {
+    // 有参数 → 命令行模式，三个参数全部必填
+    if (!cliProcess.empty() || cliCount > 0 || cliInterval > 0) {
         bool needFree = !GetConsoleWindow(); if (needFree) AllocConsole();
-        SetConsoleOutputCP(CP_UTF8);
-        wprintf(L"%s", GetHelpText().c_str());
-        if (needFree) Sleep(500);
-        return 0;
-    }
-
-    if (wantStart) {
-        if (cliProcess.empty()) {
-            bool needFree = !GetConsoleWindow(); if (needFree) AllocConsole();
-            SetConsoleOutputCP(CP_UTF8);
-            wprintf(L"[错误] start 模式必须指定 --process <进程名>\n\n%s", GetHelpText().c_str());
-            if (needFree) Sleep(500);
+        InitConsole();
+        if (cliProcess.empty() || cliCount <= 0 || cliInterval <= 0) {
+            HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+            DWORD written;
+            std::wstring msg = L"[ERROR] --process, --count, --interval are all required\n\n" + GetHelpText();
+            WriteConsoleW(hOut, msg.c_str(), (DWORD)msg.size(), &written, nullptr);
+            system("pause");
             return 1;
         }
         return RunHeadless(cliProcess, cliCount, cliInterval);
@@ -360,19 +395,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nShow) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_dpi = GetSystemDpi();
 
-    g_hMutex = CreateMutexW(nullptr, TRUE, MUTEX_NAME);
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        MessageBoxW(nullptr, L"程序已经在运行中！\n\n请在系统托盘或任务栏中查找，或检查任务管理器。",
-            L"TimeoutKill", MB_ICONWARNING | MB_OK);
-        return 0;
-    }
-
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH);
     wc.lpszClassName = WINDOW_CLASS;
     wc.hIcon = LoadIcon(nullptr, IDI_WARNING);
     RegisterClassExW(&wc);
@@ -391,7 +419,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nShow) {
         DispatchMessageW(&msg);
     }
 
-    if (g_hMutex) { ReleaseMutex(g_hMutex); CloseHandle(g_hMutex); }
     return 0;
 }
 
@@ -459,11 +486,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         SendMessageW(hInfo, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         y += Scale(44);
 
-        g_hBtnToggle = CreateWindowW(L"button", L"开始监控", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        g_hBtnToggle = CreateWindowW(L"button", L"开始监控", WS_CHILD | WS_VISIBLE | BS_FLAT | BS_PUSHBUTTON,
             x, y, Scale(130), Scale(36), hWnd, (HMENU)(INT_PTR)ID_BTN_TOGGLE, g_hInstance, nullptr);
         SendMessageW(g_hBtnToggle, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 
-        g_hBtnExit = CreateWindowW(L"button", L"退出程序", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        g_hBtnExit = CreateWindowW(L"button", L"退出程序", WS_CHILD | WS_VISIBLE | BS_FLAT | BS_PUSHBUTTON,
             x + Scale(150), y, Scale(130), Scale(36), hWnd, (HMENU)(INT_PTR)ID_BTN_EXIT, g_hInstance, nullptr);
         SendMessageW(g_hBtnExit, WM_SETFONT, (WPARAM)g_hFont, TRUE);
         y += Scale(46);
@@ -495,6 +522,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         GetPrivateProfileStringW(L"Main", L"IntervalMin", L"30", saved, 256, cfgPath);
         SetWindowTextW(g_hEditInterval, saved);
 
+        g_hWhiteBrush = CreateSolidBrush(RGB(255, 255, 255));
         StartNewLog();
         break;
     }
@@ -566,8 +594,24 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_CTLCOLORSTATIC: {
         HDC hdc = (HDC)wParam;
-        if ((HWND)lParam == g_hStatus && g_hStatusBrush) { SetBkColor(hdc, RGB(240, 240, 240)); return (LRESULT)g_hStatusBrush; }
-        break;
+        HWND hCtrl = (HWND)lParam;
+        SetBkColor(hdc, RGB(255, 255, 255));
+        SetTextColor(hdc, (hCtrl == g_hStatus) ? g_statusTextColor : g_textColor);
+        return (LRESULT)g_hWhiteBrush;
+    }
+
+    case WM_CTLCOLOREDIT: {
+        HDC hdc = (HDC)wParam;
+        SetBkColor(hdc, RGB(255, 255, 255));
+        SetTextColor(hdc, g_textColor);
+        return (LRESULT)g_hWhiteBrush;
+    }
+
+    case WM_CTLCOLORBTN: {
+        HDC hdc = (HDC)wParam;
+        SetBkColor(hdc, RGB(255, 255, 255));
+        SetTextColor(hdc, g_textColor);
+        return (LRESULT)g_hWhiteBrush;
     }
 
     case WM_CLOSE:
@@ -577,7 +621,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_DESTROY:
         if (g_hFont) DeleteObject(g_hFont);
-        if (g_hStatusBrush) DeleteObject(g_hStatusBrush);
+        if (g_hWhiteBrush) DeleteObject(g_hWhiteBrush);
         PostQuitMessage(0);
         break;
 

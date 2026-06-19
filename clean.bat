@@ -1,18 +1,17 @@
-﻿@echo off
+@echo off
 chcp 65001 >nul
 echo ===================================
-echo   TimeoutKill - 清理构建产物
+echo   TimeoutKill - Clean Build
 echo ===================================
 echo.
 
 if exist "build" (
-    echo [清理] 删除 build 目录...
+    echo [OK] Removing build directory...
     rmdir /s /q build
-    echo [完成] build 目录已删除
+    echo [OK] Done.
 ) else (
-    echo [跳过] build 目录不存在
+    echo [SKIP] build directory not found.
 )
 
 echo.
-echo 清理完毕！
 pause
