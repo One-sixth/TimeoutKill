@@ -6,22 +6,25 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(MSVC)
     add_definitions(-DUNICODE -D_UNICODE)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 endif()
 
 # 主程序源码
 add_executable(TimeoutKill main.cpp)
 
-# 子系统设置
-# Release: WINDOWS 子系统（使用 wWinMain 入口）
-# Debug: CONSOLE 子系统（需要 wmain 入口）
-target_link_options(TimeoutKill PRIVATE
-    $<$<CONFIG:Release>:/SUBSYSTEM:WINDOWS>
-    $<$<CONFIG:Debug>:/SUBSYSTEM:CONSOLE>
-)
+# 子系统：统一 WINDOWS（命令行模式按需 AllocConsole）
+target_link_options(TimeoutKill PRIVATE /SUBSYSTEM:WINDOWS)
 
 # 禁止链接器默认嵌入 manifest
 target_link_options(TimeoutKill PRIVATE /MANIFEST:NO)
+
+# Release 全套体积/内存优化
+target_compile_options(TimeoutKill PRIVATE
+    $<$<CONFIG:Release>:/O1 /GL>
+)
+target_link_options(TimeoutKill PRIVATE
+    $<$<CONFIG:Release>:/OPT:REF /OPT:ICF /LTCG /HEAP:0x1000,0x1000 /STACK:0x10000>
+)
 
 target_link_libraries(TimeoutKill PRIVATE user32 kernel32 shell32 comctl32)
 
@@ -30,7 +33,6 @@ if(MSVC)
     target_compile_definitions(TimeoutKill PRIVATE
         _CRT_SECURE_NO_WARNINGS
         WIN32_LEAN_AND_MEAN
-        $<$<CONFIG:Debug>:CONSOLE_BUILD>
     )
 endif()
 
@@ -44,4 +46,11 @@ set_target_properties(TimeoutKill PROPERTIES
 add_custom_command(TARGET TimeoutKill POST_BUILD
     COMMAND mt.exe -manifest ${CMAKE_CURRENT_SOURCE_DIR}/TimeoutKill.manifest -outputresource:$<TARGET_FILE:TimeoutKill>
     COMMENT "Embedding UAC manifest..."
+)
+
+# Release 构建后复制成品到项目目录/bin
+add_custom_command(TARGET TimeoutKill POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/bin
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:TimeoutKill> ${CMAKE_SOURCE_DIR}/bin/TimeoutKill.exe
+    COMMENT "Copying Release exe to bin/..."
 )

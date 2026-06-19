@@ -10,6 +10,35 @@
 - 累计达到最大次数 → 强制结束目标进程，并继续监控下一轮
 - 进程名不区分大小写
 
+## 两种使用方式
+
+### GUI 模式
+
+直接双击运行或右键以管理员身份运行，通过界面操作。
+
+### 命令行模式
+
+```
+TimeoutKill.exe --help                        显示帮助
+TimeoutKill.exe start --process <名称> [选项]  直接启动监控
+```
+
+**命令行选项：**
+
+| 选项 | 说明 | 默认值 |
+|------|------|--------|
+| `--process <名称>` | 目标进程名（不含路径） | 必填 |
+| `--count <次数>` | 最大监视次数 | 20 |
+| `--interval <分钟>` | 每次检查间隔（分钟） | 30 |
+
+**示例：**
+
+```cmd
+TimeoutKill.exe start --process chrome.exe --count 10 --interval 5
+```
+
+每 5 分钟检查一次 chrome.exe，累计 10 次后终止。命令行模式下按 **Ctrl+C** 随时停止。
+
 ## 安全特性
 
 - **互斥锁**：确保程序唯一运行，重复启动时弹窗提示
@@ -28,37 +57,22 @@
 1. 打开 "Developer Command Prompt for VS 2022"
 2. 运行 `build.bat`
 
-### 手动构建
-
-```cmd
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release
-cmake --build build --config Debug
-```
-
 ### 清理
 
 运行 `clean.bat` 一键删除 `build` 目录。
 
-### 输出位置
+### 输出
 
 ```
-build/bin/Release/TimeoutKill.exe   ← 发布版（无控制台）
-build/bin/Debug/TimeoutKill.exe     ← 调试版（有控制台）
+bin/TimeoutKill.exe              ← 自动复制的 Release 成品
+build/bin/Release/TimeoutKill.exe
+build/bin/Debug/TimeoutKill.exe  ← 调试版（有控制台）
 ```
-
-## 使用
-
-1. 右键 `TimeoutKill.exe` → **以管理员身份运行**
-2. 输入目标进程名（不含路径，如 `chrome.exe`）
-3. 设置最大监视次数和每次等待时间
-4. 点击「开始监控」
-5. 可随时修改参数、停止监控或退出
 
 ## 技术栈
 
 - C++20 / MSVC
-- Win32 API（原生 GUI，无第三方依赖）
+- Win32 API（原生 GUI + 命令行双模式）
 - Per-Monitor V2 高 DPI 支持
 - CMake 构建
 
