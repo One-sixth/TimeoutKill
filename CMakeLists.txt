@@ -44,13 +44,8 @@ set_target_properties(TimeoutKill PROPERTIES
 
 # 构建后用 mt.exe 嵌入 UAC manifest（仅 Release）
 add_custom_command(TARGET TimeoutKill POST_BUILD
-    COMMAND mt.exe -manifest ${CMAKE_CURRENT_SOURCE_DIR}/TimeoutKill.manifest -outputresource:$<TARGET_FILE:TimeoutKill>
-    COMMENT "Embedding UAC manifest..."
-)
-
-# Release 构建后复制成品到项目目录/bin
-add_custom_command(TARGET TimeoutKill POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/bin
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:TimeoutKill> ${CMAKE_SOURCE_DIR}/bin/TimeoutKill.exe
-    COMMENT "Copying Release exe to bin/..."
+    COMMAND ${CMAKE_COMMAND} -DCONFIG=$<CONFIG> -DSRC=$<TARGET_FILE:TimeoutKill>
+        -DMANIFEST=${CMAKE_CURRENT_SOURCE_DIR}/TimeoutKill.manifest
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake_post_build.cmake
+    COMMENT "Post-build: manifest + copy (Release only)..."
 )
